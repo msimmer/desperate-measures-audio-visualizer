@@ -3,7 +3,14 @@ window.cancelAnimationFrame = window.cancelAnimationFrame || window.mozCancelAni
 
 
 class Manager
-    constructor: ({ @visualizer, @stream } = {}) ->
+    constructor: ({ @visualizer, @stream, browser } = {}) ->
+
+        @browser =
+            loadAudioViaXMLHTTPRequestForSafari: true
+            isSafari: (window.webkitAudioContext != undefined)
+
+        for k, v of browser
+            if {}.hasOwnProperty.call @browser, k then @browser[k] = v
 
     audioContext: new (window.AudioContext || window.webkitAudioContext)()
 
@@ -14,45 +21,76 @@ class Manager
                 ogg: src.ogg
             callback: () =>
                 setTimeout(() =>
-                    @stream.audio.play()
-                    @visualizer.render()
+
+                    if @browser.isSafari and @browser.loadAudioViaXMLHTTPRequestForSafari
+                        @stream.sourceJS.onaudioprocess = () =>
+                            @visualizer.render()
+                        @stream.source.start(0)
+
+                    else
+                        @stream.audio.play()
+                        if @browser.isSafari == false then @visualizer.render()
+
                 , 0)
 
 
 class Stream
-    constructor: ({ @src, @precision, @callback } = {}) ->
+    constructor: ({ @src, @callback } = {}) ->
         @context = manager.audioContext
         @source = null
         @analyser = null
-        @precision ||= 128
         @callback ||= @noop
 
-        @audio = new Audio()
-        @audio.src = if @audio.canPlayType('audio/ogg') == 'probably' then @src.ogg else @src.mpg
-
         @analyser = @context.createAnalyser()
-        @analyser.fftSize = @precision
+        @analyser.fftSize = 2048
+        @analyser.smoothingTimeConstant = 0.3
 
-        @source = @context.createMediaElementSource(@audio)
-        @source.connect(@analyser)
+        if manager.browser.isSafari and manager.browser.loadAudioViaXMLHTTPRequestForSafari == true
+            console.log '?'
 
-        @analyser.connect(@context.destination)
+            request = new XMLHttpRequest()
+            request.open('GET', @src.mpg, true)
+            request.responseType = 'arraybuffer'
 
-        @callback @
+            @source = @context.createBufferSource()
+
+            request.onload = () =>
+                @context.decodeAudioData request.response, (buffer) =>
+
+                    @sourceJS = @context.createScriptProcessor(2048)
+                    @sourceJS.buffer = buffer
+                    @sourceJS.connect(@context.destination)
+
+                    @source.buffer = buffer
+                    @source.connect(@analyser)
+                    @source.connect(@context.destination)
+
+                    @callback @
+
+            request.send()
+
+        else
+            @audio = new Audio()
+            @audio.src = if @audio.canPlayType('audio/ogg') == 'probably' then @src.ogg else @src.mpg
+
+            @source = @context.createMediaElementSource(@audio)
+            @source.connect(@analyser)
+            @analyser.connect(@context.destination)
+
+            @callback @
+
 
 
     noop: ->
 
     destroy: (callback) ->
-        console.log 'destroy'
-        @audio.pause()
+        # @audio.pause()
 
         setTimeout(() ->
             console.log 'done'
             @audio     = null
             @context   = null
             @source    = null
-            @precision = null
             @callback  = null
             @analyser  = null
             callback()
@@ -62,77 +100,117 @@ class Stream
 
 class Visualizer
     constructor: () ->
-        @canvas       = null
-        @context      = null
-        @width        = null
-        @height       = null
-
-        @precision    = 128
-        @resizeTimer  = null
-        @deboundSpeed = 200
+        @canvas  = null
+        @context = null
+        @width   = null
+        @height  = null
 
 
-    register: ({ selector, width, height } = {}) ->
+    register: ({ selector, renderer } = {}) ->
         @canvas  = document.querySelector(selector or 'canvas')
         @context = @canvas.getContext('2d')
-        @width   = width or window.innerWidth
-        @height  = height or window.innerHeight
+
+        @width          = window.innerWidth
+        @height         = window.innerHeight
 
         @context.width  = @width
         @context.height = @height
 
+        @canvas.setAttribute 'width', @width
+        @canvas.setAttribute 'height', @height
+
         window.addEventListener 'resize', @onResize, false
+        window.addEventListener 'orientationchange', @onResize, false
+
+        @renderer = renderer or @renderer.bind(@)
 
     onResize: () =>
-        window.clearTimeout @resizeTimer
-        @resizeTimer = setTimeout(() =>
-            console.log 'resize'
-        @deboundSpeed)
+        @width = window.innerWidth
+        @height = window.innerHeight
 
-    u8RGB: (n) ->
-        r = n >> 16 & 255
-        g = n >> 8 & 255
-        b = n & 255
-        return { r: r, g: g, b: b }
+        @canvas.setAttribute 'width', @width
+        @canvas.setAttribute 'height', @height
 
-    padBin: (n) ->
-        str = n.toString(2)
-        while str.length < 8
-            str = '0' + str
-        str
+    renderer: (bufferData, bufferLength) =>
+        @context.clearRect(0, 0, @width, @height)
+
+        @context.fillStyle = 'rgb(0, 0, 0)'
+        @context.fillRect(0, 0, @width, @height)
+
+        barWidth = (@width / bufferLength) * 2.5
+        barHeight
+
+        x = 0
+        i = 0
+        while i < bufferData.length
+            u8Int = bufferData[i]
+
+            barHeight = bufferData[i] * 10
+
+            @context.fillStyle = 'rgb(' + (barHeight) + ', 50, 50)'
+            @context.fillRect(x, @height - barHeight, barWidth, barHeight)
+
+            x += barWidth + 1
+            i++
+
 
     render: =>
         if !manager.stream or !manager.stream.analyser then return
 
-        frequencyByteData = new Uint8Array(manager.stream.analyser.frequencyBinCount)
-        manager.stream.analyser.getByteFrequencyData(frequencyByteData)
+        bufferLength = manager.stream.analyser.frequencyBinCount
+        bufferData = new Uint8Array(bufferLength)
+        manager.stream.analyser.getByteFrequencyData(bufferData)
+
+        @renderer bufferData, bufferLength
+
+        unless manager.browser.isSafari and manager.browser.loadAudioViaXMLHTTPRequestForSafari
+            window.requestAnimationFrame @render
+
+
+visualizer = new Visualizer()
+
+
+
+renderers =
+    utility:
+        u8RGB: (n) ->
+            r = n >> 16 & 255
+            g = n >> 8 & 255
+            b = n & 255
+            return { r: r, g: g, b: b }
+
+        padBin: (n) ->
+            str = n.toString(2)
+            while str.length < 8
+                str = '0' + str
+            str
+
+    circlesWhite: (bufferData, bufferLength) ->
+        @context.clearRect(0, 0, @width, @height)
+        @context.fillStyle = 'rgb(0, 0, 0)'
+        @context.fillRect(0, 0, @width, @height)
 
         i = 0
-        while i < frequencyByteData.length
-            u8Int = frequencyByteData[i]
-            u8Str = @padBin(u8Int)
-            color = @u8RGB(u8Str)
-            rgba = 'rgba(' + color.r + ', ' + color.g + ', ' + color.b + ', 0.5)'
+        while i < bufferData.length
             @context.beginPath()
-            @context.arc(@width / 2, @height / 2, u8Int * 100 / 16, 0, (Math.PI * 2), false)
-
-            @context.fillStyle = rgba
-            @context.fill()
-
+            @context.arc(@width / 2, @height / 2, bufferData[i], 0, (Math.PI * 2), false)
+            @context.strokeStyle = 'white'
+            @context.lineWidth = 1
+            @context.stroke()
+            @context.closePath()
             i++
 
-        window.requestAnimationFrame @render
 
-
-
-window.manager = new Manager
-    visualizer: new Visualizer()
-    stream: {}
 
 $ ->
 
+    window.manager = new Manager
+        visualizer: visualizer
+        stream: {}
 
-    manager.visualizer.register()
+    manager.visualizer.register
+        selector: 'canvas'
+        renderer: renderers.circlesWhite
 
     src =
         mpg: 'http://localhost:8000/demo/HM1.mp3'
