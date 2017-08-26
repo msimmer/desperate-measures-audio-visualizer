@@ -1,0 +1,15 @@
+*
+
+!.gitignore
+!package.json
+!package-lock.json
+!gulpfile.coffee
+!README.md
+!LICENSE
+
+!/lib
+/lib/*
+!/lib/media.coffee
+
+!/demo
+!/demo/*
